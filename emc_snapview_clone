@@ -1,0 +1,195 @@
+#!/bin/bash
+
+#Declare variables
+
+DOTS="......................................................................."
+TODAY=$(date +"%d-%m-%y-%M-%H-%S")
+DIR=/opt/Navisphere/reports
+REP_FILE=/opt/Navisphere/reports/report_$TODAY.log
+USER=sysadmin
+PASSW=sysadmin
+NAVI=/opt/Navisphere/bin/./naviseccli 
+ADMSN=/opt/Navisphere/bin/./admsnap
+SPA=192.168.60.11
+SPB=192.168.60.12
+SID=CKM00112001132
+CPL1=34
+CPL2=35
+GRNAME=clone_test1
+SRC_LN=31
+TRG_LN=37
+CLSYNC=Syncronizing
+CLCON=Consistent
+
+echo $DOTS
+echo SCRIPT STARTED 
+echo $DOTS
+sleep 1
+
+# Create report folder and report file in /opt/Navisphere/reports
+
+echo Create a log file in /opt/Navisphere/reports
+
+if [ ! -d $DIR ];
+	then mkdir $DIR;
+fi
+
+if [ -d $DIR ];
+    then echo "Runtime: $TODAY" >> "$REP_FILE";
+fi
+
+echo $REP_FILE
+
+sleep 1
+echo $DOTS
+echo DONE
+
+#Check if array is accessible 
+
+echo $DOTS
+echo Checking array agent
+echo $DOTS
+sleep 1
+
+$NAVI -user $USER -password $PASSW -h $SPA -scope 0 getagent >> "$REP_FILE"
+
+if grep -q $SID "$REP_FILE";
+    then echo "DONE";
+	else echo "***NO ANSWER FROM ARRAY! EXIT SCRIPT!***" && exit 0;
+fi
+
+echo $DOTS
+sleep 1
+
+# ALLOCATE CPL
+
+echo Allocate Private LUNS For Clone Operation
+echo $DOTS
+
+while true; do
+read -t 30 -p "Continue (Y/n)? : " choice
+if [ $? -eq 1 ]; then echo "Continue..." && break; fi
+case $choice in 
+
+  y|Y ) echo "Allocating..." && $NAVI -user $USER -password $PASSW -h $SPA -scope 0 clone -allocatecpl -spa $CPL1 -spb $CPL2 -o >> "$REP_FILE"
+;;
+  n|N ) echo "Continue..." && break ;;
+  * ) echo "Please input Y/n : " ;;
+esac
+
+if grep -q $"Cpl failed" "$REP_FILE";
+	then echo "***Allocating Cpl failed. The LUN ID being specified is not available for CPL!***" && exit 0;
+fi 
+done
+
+echo $DOTS
+sleep 1
+
+# CREATE A CLONE GROUP WITH A SOURCE LUN
+
+echo Create clone group with a source LUN
+echo $DOTS
+sleep 1
+
+while true; do
+read -t 30 -p "Continue (Y/n)? : " answer
+if [ $? -eq 1 ]; then echo "Continue..." && break; fi
+case $answer in
+
+  y|Y ) echo "Creating..." && $NAVI -user $USER -password $PASSW -h $SPA -scope 0 snapview -createclonegroup -name clone_test1 -luns $SRC_LN -o  >> "$REP_FILE"
+;;
+  n|N ) echo "Continue..." && break ;;
+  * ) echo "Please input Y/n : ";;
+esac
+
+if grep -q $"failed" "$REP_FILE";
+        then echo "***Creating clone group failed. Perharps exists!***" && exit 0;
+fi
+done
+echo $DOTS
+sleep 1
+
+# ADD A TARGET CLONE TO THE CLONE GROUP
+
+echo Add the clone to the clone group
+echo $DOTS
+sleep 1
+
+while true; do
+read -t 30 -p "Continue (Y/n)? : " answers
+if [ $? -eq 1 ]; then echo "Continue..." && break; fi
+case $answers in
+  y|Y ) echo "Creating..." && $NAVI -user $USER -password $PASSW -h $SPA -scope 0 snapview -addclone -name clone_test1 -luns $TRG_LN  >> "$REP_FILE"
+;;
+n|N ) echo "Continue..." && break ;;
+  * ) echo "Please input Y/n : ";;
+esac
+
+if grep -q $"failed" "$REP_FILE";
+        then echo "***Failed! Cannot add a clone to the group. Perharps exists!***" && exit 0;
+fi
+done
+echo $DOTS
+sleep 1
+
+
+# Wait and monitor for clone synchronization to complete.
+
+$NAVI -user $USER -password $PASSW -h $SPA -scope 0 snapview -listclonegroup | egrep '(^Name|^CloneState|^CloneCon|^Percent|^CloneID)' >> "$REP_FILE"
+
+echo Checking clone state
+echo $DOTS
+sleep 1
+
+while grep -q $CLSYNC "$REP_FILE"; do
+	echo "***IN SYNCRONIZING***"
+sleep 1
+done
+
+if grep -q $CLCON "$REP_FILE";
+    then echo "***SYNCRONIZED***" >> "$REP_FILE";
+fi
+sleep 1         
+echo ***SYNCRONIZED*** 
+echo $DOTS
+sleep 1
+
+# OPTIONAL change sync rate for clone session to high
+# $NAVI -user $USER -password $PASSW -h $SPA -scope 0 snapview -changeclone -name clone_test1 -cloneid 0100000000000000 -syncrate high >> "$REP_FILE"
+
+# Put source database (PROD) in backup mode. First though, grab the max first_change# from V$ARCHIVED_LOG to show the earliest archived redo log we'll need at a later step
+#SQL> select max(first_change#) from v$archived_log
+#SQL> alter database begin backup;
+
+# Flush I/O from the LUN
+echo FLUSH IO 
+$ADMSN flush -o /dev/sdb1 >> "$REP_FILE"
+
+sleep 1
+echo $DOTS
+echo DONE
+echo $DOTS
+
+# Fracture the clone 
+
+echo Fracture the clone
+
+echo $REP_FILE
+
+grep -o "CloneID:\s\{1,\}\d\{1,\}" $REP_FILE | grep -o "\d\{1,\}" | while read -r id ; do 
+echo "CloneID: $id" 
+done 
+ 
+echo $DOTS
+echo DONE
+echo $DOTS
+
+
+#$NAVI -user $USER -password $PASSW -h $SPA -scope 0 snapview -fractureclone -Name clone_test1 -cloneid 0100000000000000 -o
+
+# Verify that its fractured and consistent 
+
+#$NAVI -user $USER -password $PASSW -h $SPA -scope 0 snapview -listclonegroup
+
+# End backup mode on source
+
